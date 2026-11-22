@@ -1,0 +1,8 @@
+{
+  "name": "Noted",
+  "description": "AI-powered personal academic announcement organizer for DCISM students.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

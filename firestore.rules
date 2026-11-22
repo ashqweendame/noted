@@ -1,0 +1,232 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: deny all access unless explicitly matched below
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---- Global Hardened Helpers ----
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidCategory(cat) {
+      return cat in [
+        'Examination',
+        'Enrollment',
+        'Submission Deadline',
+        'Academic Requirement',
+        'Event / Seminar',
+        'General Notice',
+        'Other'
+      ];
+    }
+
+    function isValidPriority(priority) {
+      return priority in ['High', 'Medium', 'Low'];
+    }
+
+    // ---- Entity Validation Blueprints ----
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAnnouncement(data, userId, announcementId) {
+      return data.keys().hasAll([
+          'id',
+          'ownerId',
+          'title',
+          'originalText',
+          'category',
+          'shortSummary',
+          'targetAudience',
+          'importantDates',
+          'deadlines',
+          'requiredActions',
+          'requiredDocuments',
+          'priority',
+          'uncertainOrMissingInfo',
+          'imageUrl',
+          'imageName',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'ownerId',
+          'title',
+          'originalText',
+          'category',
+          'shortSummary',
+          'targetAudience',
+          'importantDates',
+          'deadlines',
+          'requiredActions',
+          'requiredDocuments',
+          'priority',
+          'uncertainOrMissingInfo',
+          'imageUrl',
+          'imageName',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string
+        && data.id == announcementId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && data.originalText is string
+        && data.originalText.size() <= 8000
+        && data.category is string
+        && isValidCategory(data.category)
+        && data.shortSummary is string
+        && data.shortSummary.size() >= 1
+        && data.shortSummary.size() <= 1500
+        && data.targetAudience is string
+        && data.targetAudience.size() <= 200
+        && data.importantDates is list
+        && data.importantDates.size() <= 25
+        && (data.importantDates.size() == 0 || data.importantDates[0] is map)
+        && data.deadlines is list
+        && data.deadlines.size() <= 25
+        && (data.deadlines.size() == 0 || data.deadlines[0] is map)
+        && data.requiredActions is list
+        && data.requiredActions.size() <= 30
+        && (data.requiredActions.size() == 0 || data.requiredActions[0] is map)
+        && data.requiredDocuments is list
+        && data.requiredDocuments.size() <= 25
+        && (data.requiredDocuments.size() == 0 || data.requiredDocuments[0] is string)
+        && data.priority is string
+        && isValidPriority(data.priority)
+        && data.uncertainOrMissingInfo is list
+        && data.uncertainOrMissingInfo.size() <= 20
+        && (data.uncertainOrMissingInfo.size() == 0 || data.uncertainOrMissingInfo[0] is string)
+        && data.imageUrl is string
+        && data.imageUrl.size() <= 250000
+        && data.imageName is string
+        && data.imageName.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // ---- Student Profile Collection ----
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'updatedAt']);
+
+      allow delete: if false;
+
+      // ---- Personal Announcements Subcollection (Master Gate Protected) ----
+      match /announcements/{announcementId} {
+        allow get: if isValidId(userId)
+          && isValidId(announcementId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+
+        allow list: if isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId)
+          && isValidId(announcementId)
+          && isOwner(userId)
+          && isValidAnnouncement(incoming(), userId, announcementId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+
+        allow update: if isValidId(userId)
+          && isValidId(announcementId)
+          && isOwner(userId)
+          && isValidAnnouncement(incoming(), userId, announcementId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid
+          && (
+            // Action 1: Edit announcement details from Review screen
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'originalText',
+              'category',
+              'shortSummary',
+              'targetAudience',
+              'importantDates',
+              'deadlines',
+              'requiredActions',
+              'requiredDocuments',
+              'priority',
+              'uncertainOrMissingInfo',
+              'updatedAt'
+            ])
+            ||
+            // Action 2: Toggle deadline or action completion status
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'deadlines',
+              'requiredActions',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isValidId(userId)
+          && isValidId(announcementId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}
